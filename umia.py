@@ -856,13 +856,23 @@ def main() -> None:
     if SHUFFLE_WALLETS:
         random.shuffle(accounts)
 
-    with Live(render_dashboard(), refresh_per_second=4, screen=False) as live:
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            _ = [executor.submit(process_wallet, acc, capsolver_key) for acc in accounts]
-            
+    # Menggunakan executor secara manual agar bisa di-shutdown dengan bersih saat interrupted
+    executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    
+    # Daftarkan worker sebagai daemon threads agar otomatis ikut mati saat program keluar
+    for acc in accounts:
+        t = threading.Thread(target=process_wallet, args=(acc, capsolver_key), daemon=True)
+        t.start()
+
+    try:
+        with Live(render_dashboard(), refresh_per_second=4, screen=False) as live:
             while True:
                 live.update(render_dashboard())
                 time.sleep(0.25)
-
+    except KeyboardInterrupt:
+        print("\n\n[!] Bot dihentikan oleh pengguna (Ctrl + C). Keluar...")
+        executor.shutdown(wait=False, cancel_futures=True)
+        sys.exit(0)
+        
 if __name__ == "__main__":
     main()
