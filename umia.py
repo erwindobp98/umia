@@ -38,18 +38,19 @@ FAUCET_ENABLED = True      # Aktifkan Faucet
 FAUCET_RETRIES = 6
 AUTO_REGISTER = True
 
-SWAP_ENABLED = True        # Aktifkan modul Swap
-SWAP_USDC_MIN = "1"
+SWAP_ENABLED = True        # Aktifkan modul Daily Swap
+SWAP_USDC_DAILY = 6        # Target Transaksi Daily Swap per Hari (Maksimal 6x / 24 Jam)
+SWAP_USDC_MIN = "10"
 SWAP_USDC_MAX = "50"
 SWAP_SLIPPAGE_BPS = 50
 
 BID_ENABLED = True         # Aktifkan modul Bid
-BID_USDC_MIN = "1"
+BID_USDC_MIN = "10"
 BID_USDC_MAX = "50"
 BID_PRICE_MULTIPLIER = 1.5
 
-# KONFIGURASI BARU: AUTO EXIT, CLAIM, & AUTO SWAP
-AUTO_CLAIM_ENABLED = True  # Otomatis Exit Bid & Claim Token dari auction yang selesai
+# KONFIGURASI AUTO EXIT, CLAIM, & AUTO SWAP REWARD
+AUTO_CLAIM_ENABLED = True      # Otomatis Exit Bid & Claim Token dari auction yang selesai
 AUTO_SWAP_BACK_ENABLED = True # Otomatis swap token hasil auction kembali ke USDC
 
 SHUFFLE_ACTIONS = True     # Acak urutan tugas/aksi
@@ -214,13 +215,6 @@ def short_address(value: str) -> str:
         return f"{value[:6]}...{value[-4:]}"
     return value or "-"
 
-def random_delay(min_seconds: float, max_seconds: float) -> None:
-    if max_seconds <= 0:
-        return
-    lo = max(0.0, float(min_seconds))
-    hi = max(lo, float(max_seconds))
-    time.sleep(random.uniform(lo, hi))
-
 def human_price_to_x96(
     human_price: float | str | Decimal,
     *,
@@ -243,7 +237,6 @@ def human_price_to_x96(
     return snapped
 
 class DashboardLogger:
-    """Mengubah log teks biasa menjadi update status pada tabel Dashboard."""
     def __init__(self, wallet_label: str) -> None:
         self.wallet_label = wallet_label
 
@@ -512,7 +505,7 @@ class UmiaWeb3Client:
     def claim_faucet(self) -> None:
         self.log.info("[CLAIMING] Faucet...")
         res = self._make_authenticated_request("POST", f"{API_BASE}/api/v1/faucet", json={"address": self.account.address})
-        data = res.json()
+        data = res.json() if res.content else {}
         if res.status_code == 200 or data.get("success"):
             tx_h = data.get("txHash") or data.get("hash") or "0x8f2..."
             tx_fmt = f"{short_address(tx_h)} (Just now)"
@@ -538,7 +531,7 @@ class UmiaWeb3Client:
                 "recipient": self.account.address
             }
         )
-        quote_data = quote_res.json()
+        quote_data = quote_res.json() if quote_res.content else {}
         tx_data = quote_data.get("tx") or quote_data.get("transaction")
         if not tx_data:
             return
@@ -649,7 +642,7 @@ class UmiaWeb3Client:
         }
 
         bid_res = self._make_authenticated_request("POST", f"{API_BASE}/api/v1/bids", json=bid_payload)
-        res_data = bid_res.json()
+        res_data = bid_res.json() if bid_res.content else {}
         if bid_res.status_code in (200, 201) or res_data.get("success"):
             tx_h = res_data.get("txHash") or res_data.get("hash") or "0x3c2..."
             tx_fmt = f"{short_address(tx_h)} (Just now)"
@@ -658,11 +651,7 @@ class UmiaWeb3Client:
         else:
             raise RuntimeError(f"Gagal Submit Bid")
 
-    # ==========================================================================
-    # FUNGSI BARU: EXIT BIDS & CLAIM TOKENS SETELAH AUCTION ENDED
-    # ==========================================================================
     def exit_and_claim_auction(self) -> list[str]:
-        """Mengecek auction yang sudah selesai (ended), melakukan Exit Bid dan Claim Token."""
         claimed_tokens = []
         try:
             self.log.info("[CHECKING] Ended Auctions...")
@@ -670,7 +659,7 @@ class UmiaWeb3Client:
             if res.status_code != 200:
                 return claimed_tokens
 
-            history = res.json()
+            history = res.json() if res.content else []
             if not isinstance(history, list):
                 return claimed_tokens
 
@@ -678,20 +667,16 @@ class UmiaWeb3Client:
                 pool_id = pool.get("id") or pool.get("poolId")
                 status = str(pool.get("status", "")).lower()
                 is_claimable = pool.get("claimable", False) or pool.get("userHasUnclaimed", False)
-                
-                # Alamat token reward yang dimenangkan (misal FNDR, HLCR, UMIA)
                 reward_token = pool.get("tokenAddress") or pool.get("rewardTokenAddress")
 
                 if (status in ["ended", "settled", "closed"]) or is_claimable:
-                    # 1. Exit Bids
                     self.log.info(f"[EXIT BIDS] Pool #{pool_id}...")
-                    exit_res = self._make_authenticated_request(
+                    self._make_authenticated_request(
                         "POST", 
                         f"{API_BASE}/api/v1/bids/exit", 
                         json={"poolId": pool_id, "userAddress": self.account.address}
                     )
                     
-                    # 2. Claim Tokens
                     self.log.info(f"[CLAIM TOKENS] Pool #{pool_id}...")
                     claim_res = self._make_authenticated_request(
                         "POST", 
@@ -714,11 +699,7 @@ class UmiaWeb3Client:
             self.log.error(f"Exit/Claim err: {str(err)[:15]}")
             return claimed_tokens
 
-    # ==========================================================================
-    # FUNGSI BARU: AUTO-SWAP REWARD HASIL AUCTION KEMBALI KE USDC
-    # ==========================================================================
     def auto_swap_rewards_to_usdc(self, token_addresses: list[str]) -> None:
-        """Menukar seluruh token hasil claim kembali menjadi USDC untuk memutar saldo."""
         for token_addr in set(token_addresses):
             try:
                 if token_addr == USDC_ADDRESS:
@@ -737,7 +718,6 @@ class UmiaWeb3Client:
                     pass
 
                 self.log.info(f"[AUTO-SWAP] {symbol} -> USDC...")
-                
                 quote_res = self._make_authenticated_request(
                     "POST",
                     f"{API_BASE}/api/v1/swap/quote",
@@ -750,21 +730,18 @@ class UmiaWeb3Client:
                     }
                 )
                 
-                quote_data = quote_res.json()
+                quote_data = quote_res.json() if quote_res.content else {}
                 tx_data = quote_data.get("tx") or quote_data.get("transaction")
                 if not tx_data:
                     continue
 
                 target_router = Web3.to_checksum_address(tx_data.get("to"))
-                
-                # Approve Token Reward ke Router jika belum
                 allowance = token_contract.functions.allowance(self.account.address, target_router).call()
                 if allowance < bal_wei:
                     self.log.info(f"[APPROVING] {symbol}...")
                     app_tx = token_contract.functions.approve(target_router, 2**256 - 1).build_transaction({"chainId": 84532})
                     self.send_raw_transaction(app_tx)
 
-                # Eksekusi Swap
                 raw_tx = {
                     "to": target_router,
                     "data": tx_data.get("data"),
@@ -781,44 +758,70 @@ class UmiaWeb3Client:
                 self.log.error(f"Auto-Swap err: {str(err)[:15]}")
 
 # ==============================================================================
-# 7. WORKER EKSEKUSI UTAMA
+# 7. WORKER EKSEKUSI UTAMA DENGAN PERBAIKAN LOGIKA 24 JAM
 # ==============================================================================
 def process_wallet(account: AccountConfig, capsolver_key: str) -> None:
     log = DashboardLogger(account.label)
     client = UmiaWeb3Client(account, capsolver_key, log)
 
+    # State Timer & Counter Harian Terisolasi per Wallet
+    last_daily_faucet_time = 0.0
+    daily_swap_timestamps: list[float] = []
+    SECONDS_IN_DAY = 86400.0
+
     while True:
         try:
-            # 1. TAHAP CLAIMS: Cek Auction Ended -> Exit Bids & Claim Tokens
-            if AUTO_CLAIM_ENABLED:
-                claimed_tokens = client.exit_and_claim_auction()
-                
-                # 2. TAHAP AUTO-SWAP: Menukar Token Hasil Auction Kembali Ke USDC
-                if AUTO_SWAP_BACK_ENABLED and claimed_tokens:
-                    client.auto_swap_rewards_to_usdc(claimed_tokens)
+            current_time = time.time()
 
-            # 3. TAHAP BIDDING: Cek Live Auction yang Aktif
+            # Bersihkan timestamp swap yang sudah lebih dari 24 jam yang lalu (Rolling Window 24 Jam)
+            daily_swap_timestamps = [t for t in daily_swap_timestamps if current_time - t < SECONDS_IN_DAY]
+
+            # ==================================================================
+            # 1. DAILY ACTIVITIES: FAUCET & DAILY SWAP (Maks 6x per 24 Jam)
+            # ==================================================================
+            if FAUCET_ENABLED and (current_time - last_daily_faucet_time >= SECONDS_IN_DAY):
+                try:
+                    client.claim_faucet()
+                    last_daily_faucet_time = current_time
+                except Exception as err:
+                    log.error(f"Faucet err: {str(err)[:15]}")
+
+            if SWAP_ENABLED and (len(daily_swap_timestamps) < SWAP_USDC_DAILY):
+                try:
+                    amount = Decimal(str(round(random.uniform(float(SWAP_USDC_MIN), float(SWAP_USDC_MAX)), 2)))
+                    client.execute_swap(amount)
+                    
+                    daily_swap_timestamps.append(current_time)
+                    log.info(f"[DAILY SWAP] Sukses ({len(daily_swap_timestamps)}/{SWAP_USDC_DAILY})")
+                except Exception as err:
+                    log.error(f"Daily Swap err: {str(err)[:15]}")
+
+            # ==================================================================
+            # 2. CHECK LIVE AUCTION & SUBMIT BID
+            # ==================================================================
             pool = client.check_live_auction()
-            
             if pool and BID_ENABLED:
                 amount = Decimal(str(round(random.uniform(float(BID_USDC_MIN), float(BID_USDC_MAX)), 2)))
                 client.submit_bid(amount)
             else:
-                update_wallet_state(account.label, status="[WAITING] Idle")
+                update_wallet_state(account.label, status="[WAITING] No Live Auction")
 
-            # 4. TAHAP OPTIONAL SWAP / FAUCET
-            if FAUCET_ENABLED and random.random() < 0.2:
-                client.claim_faucet()
-
-            if SWAP_ENABLED and random.random() < 0.3:
-                amount = Decimal(str(round(random.uniform(float(SWAP_USDC_MIN), float(SWAP_USDC_MAX)), 2)))
-                client.execute_swap(amount)
+            # ==================================================================
+            # 3. CHECK ENDED AUCTION -> EXIT BID -> CLAIM -> AUTO-SWAP REWARD TO USDC
+            # ==================================================================
+            if AUTO_CLAIM_ENABLED:
+                claimed_tokens = client.exit_and_claim_auction()
+                
+                if AUTO_SWAP_BACK_ENABLED and claimed_tokens:
+                    client.auto_swap_rewards_to_usdc(claimed_tokens)
 
         except Exception as e:
             safe_msg = redact_text(str(e), [account.private_key, capsolver_key])
             update_wallet_state(account.label, status=f"[ERROR] {safe_msg[:20]}")
 
-        # Cooldown countdown animation pada tabel
+        # ==================================================================
+        # 4. COOLDOWN / SLEEP (REPEAT LOOP 5-8 DETIK)
+        # ==================================================================
         cooldown = random.randint(DELAY_MIN, DELAY_MAX)
         for c in range(cooldown, 0, -1):
             update_wallet_state(account.label, status=f"[SLEEP] Cooldown {c}s")
@@ -839,7 +842,6 @@ def main() -> None:
         print("[!] API Key Capsolver belum diisi di capsolver_key.txt. Keluar.")
         sys.exit(1)
 
-    # Inisialisasi shared state tiap wallet
     for acc in accounts:
         addr = Account.from_key(acc.private_key).address
         wallet_states[acc.label] = {
@@ -854,13 +856,10 @@ def main() -> None:
     if SHUFFLE_WALLETS:
         random.shuffle(accounts)
 
-    # Jalankan Live Dashboard Renderer
     with Live(render_dashboard(), refresh_per_second=4, screen=False) as live:
-        # Menjalankan Workers dalam Thread Pool
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = [executor.submit(process_wallet, acc, capsolver_key) for acc in accounts]
+            _ = [executor.submit(process_wallet, acc, capsolver_key) for acc in accounts]
             
-            # Loop pembaruan UI utama
             while True:
                 live.update(render_dashboard())
                 time.sleep(0.25)
